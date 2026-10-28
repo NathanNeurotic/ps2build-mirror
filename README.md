@@ -40,10 +40,11 @@ from a release's `pin.env`. In a workflow:
 - run: sh tools/ps2build_sdk.sh --llvm "$GITHUB_WORKSPACE/.ps2dev"
 ```
 
-The script uses, in order: a cache restore that already holds the pinned versions; this mirror, with every file
-checked against the pinned `SHA256SUMS`; the official server, pinned per component with
-`ps2build update <component> --version <tag>`. It never installs "latest", so a commit always builds with the
-SDK its pin names. `PS2BUILD_SDK_NO_FALLBACK=1` makes it fail instead of using the official server.
+The script uses, in order: a cache restore that already holds the pinned versions; the official server, pinned
+per component with `ps2build update <component> --version <tag>`; and only when that fails (an HTTP error, a
+cut-off download, or the whole attempt running past `PS2BUILD_SDK_OFFICIAL_BUDGET` seconds, default 900), this
+mirror, with every file checked against the pinned `SHA256SUMS`. It never installs "latest", so a commit always
+builds with the SDK its pin names. `PS2BUILD_SDK_NO_FALLBACK=1` makes it fail instead of using the mirror.
 
 ## Keeping it current
 
