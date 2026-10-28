@@ -1,6 +1,6 @@
 # ps2build-mirror
 
-A pinned, checksummed mirror of **techwritescode's ps2build PS2 SDK** for CI, so builds in
+A checksummed mirror of **techwritescode's ps2build PS2 SDK** for CI, so builds in
 [RiptOPL](https://github.com/NathanNeurotic/RiptOPL), [Launchstation](https://github.com/NathanNeurotic/Launchstation)
 and the other NathanNeurotic projects keep working when `git.techwritescode.dev` is down (HTTP 521,
 downloads cut off partway, connection resets).
@@ -21,7 +21,7 @@ Each release `sdk-<ps2build version>-<hash>` is one exact suite, named by a hash
 | `ogg-*.zip`, `vorbis-*.zip` | the official ogg/vorbis world packages, byte for byte (ps2build does not install them) |
 | `src-*.tar.gz`, `SOURCES.md` | corresponding source for the GPL/LGPL parts (see below) |
 | `versions.yaml` | the suite's component versions |
-| `pin.env` | the lines a consuming repository copies into `.github/ps2build-sdk.env` |
+| `pin.env` | the suite's exact versions and `SHA256SUMS` hash; consumers read the newest release's copy as their fallback |
 | `SHA256SUMS` | SHA-256 of every asset; consumers pin the hash of this file |
 
 The archives are not rebuilt or patched. A fix that the SDK needs (for example the LLVM libjpeg symbol tables)
@@ -30,34 +30,61 @@ belongs upstream or in the consuming repository, never in the mirror.
 ## Using it
 
 Copy [`consumer/ps2build_sdk.sh`](consumer/ps2build_sdk.sh) into the repository and add `.github/ps2build-sdk.env`
-from a release's `pin.env`. In a workflow:
+naming the mirror and the components (bare names follow the newest release; `name=version` holds one back):
 
-```yaml
-- uses: actions/cache@v4
-  with:
-    path: ${{ github.workspace }}/.ps2dev
-    key: ps2build-sdk-${{ hashFiles('.github/ps2build-sdk.env') }}-llvm
-- run: sh tools/ps2build_sdk.sh --llvm "$GITHUB_WORKSPACE/.ps2dev"
+```sh
+PS2BUILD_SDK_MIRROR=NathanNeurotic/ps2build-mirror
+PS2BUILD_COMPONENTS="cmake ninja ps2build sdk-core sdk-world toolchain tools vcl"
+PS2BUILD_LLVM_TOOLCHAIN=latest
 ```
 
-The script uses, in order: a cache restore that already holds the pinned versions; the official server, pinned
-per component with `ps2build update <component> --version <tag>`; and only when that fails (an HTTP error, a
-cut-off download, or the whole attempt running past `PS2BUILD_SDK_OFFICIAL_BUDGET` seconds, default 900), this
-mirror, with every file checked against the pinned `SHA256SUMS`. It never installs "latest", so a commit always
-builds with the SDK its pin names. `PS2BUILD_SDK_NO_FALLBACK=1` makes it fail instead of using the mirror.
+In a workflow:
+
+```yaml
+- name: Resolve the latest ps2build SDK
+  id: sdk
+  run: sh tools/ps2build_sdk.sh --resolve --llvm "$RUNNER_TEMP/ps2build-sdk.env"
+- name: Restore the ps2build SDK
+  id: sdk-cache
+  uses: actions/cache/restore@v4
+  with:
+    path: ${{ github.workspace }}/.ps2dev
+    key: ps2build-sdk-${{ runner.os }}-llvm-${{ steps.sdk.outputs.key }}
+    restore-keys: ps2build-sdk-${{ runner.os }}-llvm-
+- name: Install the ps2build SDK
+  run: sh tools/ps2build_sdk.sh --llvm "$GITHUB_WORKSPACE/.ps2dev"
+- name: Cache the ps2build SDK
+  if: ${{ steps.sdk-cache.outputs.cache-hit != 'true' && env.PS2BUILD_SDK_STALE != 'true' }}
+  uses: actions/cache/save@v4
+  with:
+    path: ${{ github.workspace }}/.ps2dev
+    key: ps2build-sdk-${{ runner.os }}-llvm-${{ steps.sdk.outputs.key }}
+```
+
+`--resolve` asks `git.techwritescode.dev`'s release API for the newest version of each component (or, when the
+API is down, takes them from this mirror's newest release, with a warning) and keys the cache on them, so a new
+upstream release is picked up by the next build. The install step then uses, in order: the cached SDK if it holds
+those versions; an older cached SDK updated in place with `ps2build update <component> --version <tag>`, or a
+fresh install, from the official server; and only when that fails (an HTTP error, a cut-off download, or the
+attempt running past `PS2BUILD_SDK_OFFICIAL_BUDGET` seconds, default 900), this mirror's newest release, with
+every file checked against its `SHA256SUMS`. If that release is older than the latest SDK, the job warns and
+names the components that differ, and the workflow above does not cache it under the latest versions.
+`PS2BUILD_SDK_NO_FALLBACK=1` makes it fail instead of using the mirror.
+
+Following the newest release means an upstream release that breaks a build breaks it on the next run; hold that
+component back with `name=version` in `.github/ps2build-sdk.env` until it is fixed.
 
 ## Keeping it current
 
 [`refresh`](.github/workflows/refresh.yml) installs the newest official suite and, if its tag is not released
-yet, verifies and publishes it.
+yet, verifies and publishes it, so the fallback stays close to the latest SDK.
 
-- **Run it manually** (Actions → refresh → Run workflow) to publish a new suite.
-- The **weekly** run only builds and reports in its summary whether upstream moved, unless the repository
-  variable `AUTO_PUBLISH` is `true`.
-- Consumers move to a new suite by replacing their `.github/ps2build-sdk.env` with the new `pin.env`, in a PR,
-  so the bump goes through their CI like any other change.
+- A **daily** run asks the release API first and builds only when the newest suite is not mirrored yet. A
+  **weekly** run always builds, in case the API is down. Both publish unless the repository variable
+  `AUTO_PUBLISH` is `false`.
+- **Run it manually** (Actions → refresh → Run workflow) to publish at once.
 
-Old releases are kept so older commits can still be rebuilt with their exact SDK.
+Old releases are kept so older commits can still be rebuilt with an older SDK.
 
 ## Sizes
 

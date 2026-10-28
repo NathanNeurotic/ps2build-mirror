@@ -7,6 +7,7 @@ SHA256SUMS plus the pin snippet consumers copy. Nothing is modified: the archive
 tree byte for byte, and extra packages and sources are the upstream files as served.
 
 Usage: build_release.py OUT_DIR [--work DIR]
+       build_release.py --check    (print the tag the newest suite would get, from the release API only)
 Writes OUT_DIR/<assets>, OUT_DIR/release.json (tag, versions) and OUT_DIR/notes.md.
 """
 import argparse
@@ -25,6 +26,9 @@ import urllib.request
 HOST = "https://git.techwritescode.dev"
 API = HOST + "/api/v1/repos/ps2"
 EXTRAS = ("ogg", "vorbis")          # world packages ps2build does not install; RiptOPL needs them
+# What "ps2build update" plus llvm-toolchain installs (versions.yaml). --check resolves these from the API;
+# a full build warns when versions.yaml lists something else, so a new component is noticed.
+COMPONENTS = ("cmake", "llvm-toolchain", "ninja", "ps2build", "sdk-core", "sdk-world", "toolchain", "tools", "vcl")
 TOOLCHAINS = ("gcc", "llvm")
 # Corresponding source for the GPL/LGPL parts of the binaries: which config.sh in which repo names
 # which upstream repositories. LLVM itself is Apache-2.0 and is not mirrored (its commit is recorded).
@@ -178,19 +182,37 @@ def sources(out, versions):
     return rows
 
 
+def suite_tag(everything):
+    digest = hashlib.sha256(json.dumps(everything, sort_keys=True).encode()).hexdigest()[:8]
+    return f"sdk-{everything['ps2build']}-{digest}"
+
+
+def check():
+    """The tag of the newest official suite, from the release API alone (no install)."""
+    everything = {name: api(f"{name}/releases/latest")["tag_name"] for name in COMPONENTS}
+    everything.update({f"extra:{name}": api(f"{name}/releases/latest")["tag_name"] for name in EXTRAS})
+    print(suite_tag(everything))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("out", type=Path)
+    parser.add_argument("out", type=Path, nargs="?")
     parser.add_argument("--work", type=Path, default=Path("work"))
+    parser.add_argument("--check", action="store_true", help="print the newest suite's tag and exit")
     args = parser.parse_args()
+    if args.check:
+        return check()
+    if args.out is None:
+        parser.error("OUT_DIR is required")
     out, sdk = args.out.resolve(), (args.work / "sdk").resolve()
     out.mkdir(parents=True, exist_ok=True)
 
     versions = install_sdk(sdk)
+    if set(versions) != set(COMPONENTS):
+        print(f"::warning::versions.yaml lists {sorted(versions)}, not {sorted(COMPONENTS)}; update COMPONENTS", flush=True)
     extra_versions = extras(out)
     everything = {**versions, **{f"extra:{k}": v for k, v in extra_versions.items()}}
-    digest = hashlib.sha256(json.dumps(everything, sort_keys=True).encode()).hexdigest()[:8]
-    tag = f"sdk-{versions['ps2build']}-{digest}"
+    tag = suite_tag(everything)
 
     base_members = sorted(p.name for p in sdk.iterdir() if p.name != "llvm-toolchain")
     stem = f"ps2build-{tag}-linux-amd64"
