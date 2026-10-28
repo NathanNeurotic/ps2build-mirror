@@ -1,0 +1,79 @@
+name: refresh
+
+# Builds a mirror release of the newest official ps2build suite. The tag is derived from the component
+# versions, so a run where nothing changed upstream finds its tag already released and stops.
+#
+# Manual runs publish. The weekly run only reports, unless the repository variable AUTO_PUBLISH is
+# "true": publishing a release is a decision, not a side effect of a timer.
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the release (off = build and report only)
+        type: boolean
+        default: true
+  schedule:
+    - cron: "17 6 * * 1"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      # The official host resets HTTP/2 streams under load; ps2build is a Go binary.
+      GODEBUG: http2client=0
+      PUBLISH: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.publish) || (vars.AUTO_PUBLISH == 'true' && 'true' || 'false') }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the newest official suite and build the release
+        run: python3 scripts/build_release.py dist --work "$RUNNER_TEMP/work"
+
+      - name: Check whether this suite is already mirrored
+        id: check
+        run: |
+          tag=$(python3 -c "import json; print(json.load(open('dist/release.json'))['tag'])")
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "\`$tag\` is already mirrored; nothing changed upstream." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Verify the archives against SHA256SUMS and a clean unpack
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          cd dist
+          sha256sum -c SHA256SUMS
+          mkdir "$RUNNER_TEMP/verify"
+          for part in base llvm; do
+            tar --zstd -xf ps2build-*-linux-amd64-$part.tar.zst -C "$RUNNER_TEMP/verify"
+            (cd "$RUNNER_TEMP/verify" && sha256sum -c --quiet "$GITHUB_WORKSPACE/dist/"ps2build-*-linux-amd64-$part.files.sha256)
+          done
+          "$RUNNER_TEMP/verify/ps2build" version
+
+      - name: Publish
+        if: steps.check.outputs.exists == 'false' && env.PUBLISH == 'true'
+        run: |
+          tag=${{ steps.check.outputs.tag }}
+          gh release create "$tag" --title "$tag" --notes-file dist/notes.md \
+            $(find dist -maxdepth 1 -type f ! -name notes.md | sort)
+
+      - name: Summary
+        if: always() && steps.check.outputs.exists == 'false'
+        run: |
+          if [ "$PUBLISH" = true ]; then
+            echo "Published \`${{ steps.check.outputs.tag }}\`." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "New suite \`${{ steps.check.outputs.tag }}\` built but **not published** (run the workflow manually to publish)." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          [ -f dist/notes.md ] && cat dist/notes.md >> "$GITHUB_STEP_SUMMARY"
