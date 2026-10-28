@@ -1,10 +1,12 @@
 name: refresh
 
-# Builds a mirror release of the newest official ps2build suite. The tag is derived from the component
-# versions, so a run where nothing changed upstream finds its tag already released and stops.
+# Builds a mirror release of the newest official ps2build suite, so the consumers' fallback stays close to the
+# SDK they install from git.techwritescode.dev. The tag is derived from the component versions, so a run where
+# nothing changed upstream finds its tag already released and stops.
 #
-# Manual runs publish. The weekly run only reports, unless the repository variable AUTO_PUBLISH is
-# "true": publishing a release is a decision, not a side effect of a timer.
+# A daily run asks the official release API for the newest versions first and builds only when that suite is
+# not mirrored yet; the weekly run always builds (and stops at the existing tag), in case the API is down.
+# Scheduled runs publish unless the repository variable AUTO_PUBLISH is "false"; manual runs have a switch.
 on:
   workflow_dispatch:
     inputs:
@@ -13,6 +15,7 @@ on:
         type: boolean
         default: true
   schedule:
+    - cron: "41 5 * * *"
     - cron: "17 6 * * 1"
 
 permissions:
@@ -29,16 +32,28 @@ jobs:
     env:
       # The official host resets HTTP/2 streams under load; ps2build is a Go binary.
       GODEBUG: http2client=0
-      PUBLISH: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.publish) || (vars.AUTO_PUBLISH == 'true' && 'true' || 'false') }}
+      PUBLISH: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.publish) || (vars.AUTO_PUBLISH != 'false' && 'true' || 'false') }}
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
 
+      - name: Ask the release API whether upstream moved
+        id: pre
+        if: github.event.schedule == '41 5 * * *'
+        run: |
+          # An unreachable API is not a reason to skip: the build below then decides.
+          if tag=$(python3 scripts/build_release.py --check) && gh release view "$tag" >/dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "\`$tag\` is already mirrored; nothing changed upstream." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Install the newest official suite and build the release
+        if: steps.pre.outputs.skip != 'true'
         run: python3 scripts/build_release.py dist --work "$RUNNER_TEMP/work"
 
       - name: Check whether this suite is already mirrored
         id: check
+        if: steps.pre.outputs.skip != 'true'
         run: |
           tag=$(python3 -c "import json; print(json.load(open('dist/release.json'))['tag'])")
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
@@ -74,6 +89,6 @@ jobs:
           if [ "$PUBLISH" = true ]; then
             echo "Published \`${{ steps.check.outputs.tag }}\`." >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "New suite \`${{ steps.check.outputs.tag }}\` built but **not published** (run the workflow manually to publish)." >> "$GITHUB_STEP_SUMMARY"
+            echo "New suite \`${{ steps.check.outputs.tag }}\` built but **not published** (AUTO_PUBLISH is false; run the workflow manually to publish)." >> "$GITHUB_STEP_SUMMARY"
           fi
           [ -f dist/notes.md ] && cat dist/notes.md >> "$GITHUB_STEP_SUMMARY"
